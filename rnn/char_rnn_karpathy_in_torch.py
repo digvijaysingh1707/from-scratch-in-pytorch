@@ -2,6 +2,7 @@
 import os
 import shutil
 from datetime import datetime
+import matplotlib.pyplot as plt
 import torch
 from torch import nn
 
@@ -99,15 +100,18 @@ class RNNCell:
         }
 
         # Initialize Model Hidden States
-        self.reset_hidden_states()
+        self.reset_hidden_state()
+        self.losses = []
 
-    def reset_hidden_states(self) -> None:
+    def reset_hidden_state(self) -> None:
         # Start with H0
-        # self.hidden_states = [torch.zeros((self.hidden_size, 1))]
-        self.hidden_states = []
+        self.last_hidden_state = torch.zeros((self.hidden_size, 1))
 
     def forward(
-        self, inputs: list, targets: list, h_prev: torch.tensor
+        # self, inputs: list, targets: list, h_prev: torch.tensor
+        self,
+        inputs: list,
+        targets: list,
     ) -> torch.tensor:
         """Forward Function to return the y_pred
 
@@ -119,10 +123,8 @@ class RNNCell:
         Returns:
             torch.tensor: Loss
         """
-        # hs, ys = {}, {}
-        self.reset_hidden_states()
-        self.hidden_states.append(h_prev)
-
+        hs = {}
+        hs[-1] = self.last_hidden_state
         cross_entropy_loss = nn.CrossEntropyLoss()
         loss = torch.tensor(0, dtype=torch.float32)
 
@@ -133,14 +135,11 @@ class RNNCell:
             x_one_hot[inputs[t]] = 1
 
             # Calc hidden state & output
-            self.hidden_states.append(
-                torch.tanh(
-                    (self.W_xh @ x_one_hot)
-                    + (self.W_hh @ self.hidden_states[t])
-                    + self.bh
-                )
+            hs[t] = torch.tanh(
+                (self.W_xh @ x_one_hot) + (self.W_hh @ hs[t - 1]) + self.bh
             )
-            y_hat = (self.W_hy @ self.hidden_states[t + 1]) + self.by
+
+            y_hat = (self.W_hy @ hs[t]) + self.by
             loss += cross_entropy_loss(
                 y_hat.flatten(), torch.tensor(targets[t])
             )
@@ -148,6 +147,8 @@ class RNNCell:
         # take average
         loss = loss / len(inputs)
         loss.backward(retain_graph=True)
+        self.losses.append(loss.item())
+        # self.last_hidden_state = hs[t]
 
         # Clip Grads
         for param in list(self.model_params.values()):
@@ -183,6 +184,16 @@ class RNNCell:
         # Load Weights
         for name, param in self.model_params.items():
             param = torch.load(f"{model_dir}/{model_ckpt}/weights_{name}.pt")
+
+    def plot_losses(self) -> plt.plot:
+        """Plot Loss
+
+        Returns:
+            plt.plot: Plot Losses
+        """
+        plt.xlabel("Iterations")
+        plt.ylabel("Losses")
+        plt.plot(self.losses)
 
     def train(
         self,
@@ -221,44 +232,45 @@ class RNNCell:
         os.makedirs(model_dir)
 
         curr_epoch = 0
+        curr_idx = 0
+        self.reset_hidden_state()
         while curr_epoch < num_epochs:
-            curr_idx = 0
-            h0 = torch.zeros((self.hidden_size, 1))
-            while curr_idx + seq_length < self.data_generator.data_size:
 
-                # Generate Current Inputs & Targets
-                inputs = self.data_generator.char_seq_to_int_seq(
-                    curr_idx, seq_length
-                )
-                targets = self.data_generator.char_seq_to_int_seq(
-                    curr_idx + 1, seq_length
-                )
+            # Generate Current Inputs & Targets
+            inputs = self.data_generator.char_seq_to_int_seq(
+                curr_idx, seq_length
+            )
+            targets = self.data_generator.char_seq_to_int_seq(
+                curr_idx + 1, seq_length
+            )
 
-                # Set the grad to None
-                for param in list(self.model_params.values()):
-                    param.grad = None
+            # Set the grad to None
+            for param in list(self.model_params.values()):
+                param.grad = None
 
-                loss = self.forward(inputs, targets, h0)
+            loss = self.forward(inputs, targets)
 
-                # Update grad
-                for param in list(self.model_params.values()):
-                    param.data -= learning_rate * param.grad
+            # Update grad
+            for param in list(self.model_params.values()):
+                param.data -= learning_rate * param.grad
 
-                # Save Model
-                if curr_epoch % checkpoint_range == 0:
-                    learning_rate = learning_rate * 0.99
-                    print(
-                        f"Iteration {curr_epoch}; loss: {loss.item()}"
-                    )  # print progress
+            # Save Model
+            if curr_epoch % checkpoint_range == 0:
+                learning_rate = learning_rate * 0.99
+                print(
+                    f"Iteration {curr_epoch}; loss: {loss.item()}"
+                )  # print progress
 
-                    if save_model:
-                        self.save_model_params(model_dir, curr_epoch)
+                if save_model:
+                    self.save_model_params(model_dir, curr_epoch)
 
-                curr_epoch += 1
-                # Use the last hidden state
-                # h0 = self.hidden_states[-1]
-
+            if curr_idx + seq_length < self.data_generator.data_size:
                 curr_idx += seq_length
+            else:
+                curr_idx = 0
+                self.reset_hidden_state()
+
+            curr_epoch += 1
 
     def sample(self, h: torch.tensor, seed_char: str, seq_len: int) -> str:
         """Sample from the model
