@@ -130,12 +130,12 @@ class LSTM(nn.Module):
         optimizer = Adam(self.parameters(), lr=lr)
 
         curr_epoch = 0
-        curr_batch = 0
         max_batch_idx = int(len(datagen.data) / seq_length)
 
         self.losses = []
 
         while curr_epoch < num_epochs:
+            curr_batch = 0
             while curr_batch < max_batch_idx - 1:
                 # Generate inputs and targets
                 x_data = datagen.char_seq_to_one_hot(
@@ -173,6 +173,7 @@ class LSTM(nn.Module):
                 print(
                     f"Iteration {curr_epoch}; loss: {loss.item()}"
                 )  # print progress
+                torch.save(self.state_dict(), f"{model_dir}/{curr_epoch}")
                 # if save_model:
                 #     self.save_model_params(model_dir, curr_epoch)
 
