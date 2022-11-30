@@ -256,7 +256,7 @@ class CharLSTM(nn.Module):
             )
             num_batches = split_idx // (batch_size * seq_length)
             with tqdm(
-                data_generator, total=num_batches, unit="batch"
+                data_generator, total=num_batches, unit=" batch"
             ) as tepoch:
                 for x, y in tepoch:
                     counter += 1
