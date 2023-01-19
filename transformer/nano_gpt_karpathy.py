@@ -6,10 +6,19 @@ from datetime import datetime
 import torch
 from torch import nn
 
-emb_size = 32
-block_size = 8
-head_size = 16
-batch_size = 4
+emb_size = 256
+block_size = 32
+head_size = 128
+batch_size = 512
+
+
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
+print(f"Using Device: {device}")
 
 
 class DataGenerator:
@@ -42,7 +51,7 @@ class DataGenerator:
         encoded = []
         for ch in input_str:
             encoded.append(self.char_to_ix[ch])
-        return torch.tensor(encoded)
+        return torch.tensor(encoded, device=device)
 
     def decode(self, input_ints: torch.tensor) -> str:
         decoded = ""
@@ -63,7 +72,7 @@ class DataGenerator:
 
         # extend the generated starting points
         X = torch.stack(
-            [batch_to_generate_from[ix : ix + block_size] for ix in ixes]
+            [batch_to_generate_from[ix : ix + block_size] for ix in ixes],
         )  # B, T
         Y = torch.stack(
             [
@@ -167,6 +176,7 @@ class GPT(nn.Module):
         self, num_blocks, n_heads, data_generator: DataGenerator
     ) -> None:
         super().__init__()
+        self.to(device)
         self.data_generator = data_generator
         self.semantic_embedding_table = nn.Embedding(
             self.data_generator.vocab_size, emb_size
@@ -224,3 +234,9 @@ class GPT(nn.Module):
                 # Save model
                 with open(f"{model_dir}/epoch_{epoch}.net", "wb") as f:
                     torch.save(self.state_dict(), f)
+
+
+if __name__ == "__main__":
+    data_gen = DataGenerator("shakespear.txt")
+    gpt = GPT(6, 4, data_gen)
+    gpt.train(num_epochs=100, checkpoint_itvl=10)
