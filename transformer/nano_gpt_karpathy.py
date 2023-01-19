@@ -237,6 +237,7 @@ class GPT(nn.Module):
 
 
 if __name__ == "__main__":
-    data_gen = DataGenerator("shakespear.txt")
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    data_gen = DataGenerator(f"{dir_path}/shakespear.txt")
     gpt = GPT(6, 4, data_gen)
     gpt.train(num_epochs=100, checkpoint_itvl=10)
