@@ -2,6 +2,7 @@
 import os
 import shutil
 from datetime import datetime
+from time import time
 
 import torch
 from torch import nn
@@ -67,7 +68,10 @@ class DataGenerator:
 
         # generate random starting points
         ixes = torch.randint(
-            0, len(batch_to_generate_from) - block_size, (batch_size,)
+            0,
+            len(batch_to_generate_from) - block_size,
+            (batch_size,),
+            device=device,
         )
 
         # extend the generated starting points
@@ -127,6 +131,7 @@ class ScaledAttention(nn.Module):
         # Produce weights
         wei = Q @ K.transpose(-1, -2)  # B, T, T
         tril = torch.tril(torch.ones(block_size, block_size))
+        tril = tril.to(device)
         masked_wei = wei.masked_fill(tril == 0, float("-inf")) / (
             self.single_head_size**0.5
         )
@@ -176,7 +181,6 @@ class GPT(nn.Module):
         self, num_blocks, n_heads, data_generator: DataGenerator
     ) -> None:
         super().__init__()
-        self.to(device)
         self.data_generator = data_generator
         self.semantic_embedding_table = nn.Embedding(
             self.data_generator.vocab_size, emb_size
@@ -191,7 +195,7 @@ class GPT(nn.Module):
         sem_emb = self.semantic_embedding_table(X)  # B, T, emb_size
         # TODO: Check if position start from 0 or 1
         pos_emb = self.positional_emb_table(
-            torch.arange(block_size)
+            torch.arange(block_size, device=device)
         )  # T, emb_size
         # return sem_emb + pos_emb
         att_out = self.attention_layers(sem_emb + pos_emb)  # B, T, emb_size
@@ -214,6 +218,7 @@ class GPT(nn.Module):
         loss_func = nn.CrossEntropyLoss()
 
         for epoch in range(1, num_epochs + 1):
+            start_time = time()
             X, Y = self.data_generator.generate_batch(
                 "train", batch_size, block_size
             )
@@ -229,7 +234,10 @@ class GPT(nn.Module):
             loss.backward()
             opt.step()
             if epoch % checkpoint_itvl == 0:
-                print(f"Epoch: {epoch}, Loss: {loss.item()}")
+                total_time = time() - start_time
+                print(
+                    f"Epoch: {epoch}, Loss: {loss.item()}; Time taken: {total_time}"
+                )
 
                 # Save model
                 with open(f"{model_dir}/epoch_{epoch}.net", "wb") as f:
@@ -240,4 +248,5 @@ if __name__ == "__main__":
     dir_path = os.path.dirname(os.path.realpath(__file__))
     data_gen = DataGenerator(f"{dir_path}/shakespear.txt")
     gpt = GPT(6, 4, data_gen)
-    gpt.train(num_epochs=100, checkpoint_itvl=10)
+    gpt.to(device)
+    gpt.train(num_epochs=2, checkpoint_itvl=2)
