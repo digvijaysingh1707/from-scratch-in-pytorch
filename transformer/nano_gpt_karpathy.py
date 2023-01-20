@@ -137,7 +137,7 @@ class ScaledAttention(nn.Module):
         V = self.l_value(X)  # B, T, single_head_size
         # Produce weights
         wei = Q @ K.transpose(-1, -2)  # B, T, T
-        T = X.shape(1)
+        T = X.shape[1]
         masked_wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf")) / (
             self.single_head_size**0.5
         )
