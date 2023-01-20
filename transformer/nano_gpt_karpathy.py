@@ -11,6 +11,7 @@ emb_size = 256
 block_size = 32
 head_size = 128
 batch_size = 512
+dropout = 0.4
 
 
 if torch.cuda.is_available():
@@ -94,6 +95,7 @@ class FeedFowardLayer(nn.Module):
             nn.Linear(emb_size, emb_size * scaling_factor),
             nn.ReLU(),
             nn.Linear(emb_size * scaling_factor, emb_size),
+            nn.Dropout(dropout),
         )
 
     def forward(self, X):
@@ -116,6 +118,11 @@ class ScaledAttention(nn.Module):
         self.l_query = nn.Linear(emb_size, single_head_size)
         self.l_value = nn.Linear(emb_size, single_head_size)
 
+        self.register_buffer(
+            "tril", torch.tril(torch.ones(block_size, block_size))
+        )
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, X) -> torch.tensor:
         """Forward Function
 
@@ -130,16 +137,14 @@ class ScaledAttention(nn.Module):
         V = self.l_value(X)  # B, T, single_head_size
         # Produce weights
         wei = Q @ K.transpose(-1, -2)  # B, T, T
-        tril = torch.tril(torch.ones(block_size, block_size))
         tril = tril.to(device)
-        masked_wei = wei.masked_fill(tril == 0, float("-inf")) / (
+        T = X.shape(1)
+        masked_wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf")) / (
             self.single_head_size**0.5
         )
         soft_wei = masked_wei.softmax(-1)  # B, T, T
-
         out = soft_wei @ V  # B, T, single_head_size
         return out
-        # return self.ff(out) # B, T, emb_size
 
 
 class MultiHeadedAttention(nn.Module):
@@ -150,12 +155,15 @@ class MultiHeadedAttention(nn.Module):
             [ScaledAttention(head_size // n_heads) for i in range(n_heads)]
         )
         self.proj_layer = nn.Linear(head_size, emb_size)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, X) -> torch.tensor:
         out = torch.cat(
             [self.attention_blocks[ix](X) for ix in range(self.n_heads)], -1
         )
-        return self.proj_layer(out)  # 4, 8, 16 -> 4, 8, 32
+        # B, T, head_size -> B, T, emb_size
+        out = self.dropout(self.proj_layer(out))
+        return out
 
 
 class AttentionBlock(nn.Module):
@@ -163,7 +171,8 @@ class AttentionBlock(nn.Module):
         super().__init__()
         self.mha = MultiHeadedAttention(n_heads)
         self.ff = FeedFowardLayer()
-        self.layer_norm = nn.LayerNorm(emb_size)
+        self.ln1 = nn.LayerNorm(emb_size)
+        self.ln2 = nn.LayerNorm(emb_size)
 
     def forward(self, X: torch.tensor):
         """_summary_
@@ -171,8 +180,8 @@ class AttentionBlock(nn.Module):
         Args:
             X (torch.tensor): Should be input emb (sem_emb + pos_emb)
         """
-        X = self.mha(self.layer_norm(X)) + X
-        out = self.ff(self.layer_norm(X)) + X
+        X = self.mha(self.ln1(X)) + X
+        out = self.ff(self.ln2(X)) + X
         return out
 
 
@@ -187,9 +196,11 @@ class GPT(nn.Module):
         )
         self.positional_emb_table = nn.Embedding(block_size, emb_size)
         self.attention_layers = nn.Sequential(
-            *[AttentionBlock(n_heads) for i in range(num_blocks)]
+            *[AttentionBlock(n_heads) for _ in range(num_blocks)]
         )
         self.linear_layer = nn.Linear(emb_size, self.data_generator.vocab_size)
+        # final layer norm
+        self.ln_f = nn.LayerNorm(emb_size)
 
     def forward(self, X):
         sem_emb = self.semantic_embedding_table(X)  # B, T, emb_size
@@ -198,8 +209,10 @@ class GPT(nn.Module):
             torch.arange(block_size, device=device)
         )  # T, emb_size
         # return sem_emb + pos_emb
-        att_out = self.attention_layers(sem_emb + pos_emb)  # B, T, emb_size
-        return self.linear_layer(att_out)  # B, T, vocab_size
+        out = self.ln_f(
+            self.attention_layers(sem_emb + pos_emb)
+        )  # B, T, emb_size
+        return self.linear_layer(out)  # B, T, vocab_size
 
     def train(self, num_epochs: int, checkpoint_itvl: int, save_model=True):
         if save_model:
