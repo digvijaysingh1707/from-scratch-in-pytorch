@@ -214,7 +214,7 @@ class GPT(nn.Module):
                 shutil.rmtree(model_dir)
             os.makedirs(model_dir)
 
-        opt = torch.optim.AdamW(self.parameters())
+        opt = torch.optim.AdamW(self.parameters(), lr=3e-4)
         loss_func = nn.CrossEntropyLoss()
 
         for epoch in range(1, num_epochs + 1):
