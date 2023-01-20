@@ -260,5 +260,8 @@ if __name__ == "__main__":
     dir_path = os.path.dirname(os.path.realpath(__file__))
     data_gen = DataGenerator(f"{dir_path}/shakespear.txt")
     gpt = GPT(6, 4, data_gen)
+    print(
+        f"Total {sum(p.numel() for p in gpt.parameters()) / 1e6}M parameters"
+    )
     gpt.to(device)
     gpt.train(num_epochs=2, checkpoint_itvl=2)
