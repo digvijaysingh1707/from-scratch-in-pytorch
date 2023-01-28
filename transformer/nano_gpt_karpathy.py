@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 DEFAULT_DROPOUT_RATE = 0.4
 MODEL_NAME = "nanoGPT"
@@ -135,9 +136,9 @@ class ScaledAttention(nn.Module):
         """
         super().__init__()
         self.head_size = head_size
-        self.l_key = nn.Linear(emb_size, head_size)
-        self.l_query = nn.Linear(emb_size, head_size)
-        self.l_value = nn.Linear(emb_size, head_size)
+        self.l_key = nn.Linear(emb_size, head_size, bias=False)
+        self.l_query = nn.Linear(emb_size, head_size, bias=False)
+        self.l_value = nn.Linear(emb_size, head_size, bias=False)
 
         self.register_buffer(
             "tril", torch.tril(torch.ones(block_size, block_size))
@@ -153,17 +154,16 @@ class ScaledAttention(nn.Module):
         Returns:
             torch.tensor: Output of shape B, T, head_size
         """
+        B, T, C = X.shape
         Q = self.l_query(X)  # B, T, head_size
         K = self.l_key(X)  # B, T, head_size
         V = self.l_value(X)  # B, T, head_size
         # Produce weights
-        wei = Q @ K.transpose(-1, -2)  # B, T, T
-        T = X.shape[1]
-        masked_wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf")) / (
-            self.head_size**0.5
-        )
-        soft_wei = masked_wei.softmax(-1)  # B, T, T
-        out = soft_wei @ V  # B, T, head_size
+        wei = Q @ K.transpose(-2, -1) * C**-0.5  # B, T, T
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        wei = wei.softmax(-1)  # B, T, T
+        wei = self.dropout(wei)
+        out = wei @ V  # B, T, head_size
         return out
 
 
@@ -210,9 +210,7 @@ class MultiHeadedAttention(nn.Module):
         Returns:
             torch.tensor: _description_
         """
-        out = torch.cat(
-            [self.attention_blocks[ix](X) for ix in range(self.n_heads)], -1
-        )
+        out = torch.cat([block(X) for block in self.attention_blocks], -1)
         # B, T, head_size -> B, T, emb_size
         out = self.dropout(self.proj_layer(out))
         return out
@@ -318,7 +316,7 @@ class GPT(nn.Module):
         sem_emb = self.semantic_embedding_table(X)  # B, T, emb_size
         # TODO: Check if position start from 0 or 1
         pos_emb = self.positional_emb_table(
-            torch.arange(self.block_size, device=self.device)
+            torch.arange(X.shape[1], device=self.device)
         )  # T, emb_size
         # return sem_emb + pos_emb
         out = self.ln_f(
@@ -332,7 +330,7 @@ class GPT(nn.Module):
         num_epochs: int,
         checkpoint_itvl: int,
         lr=3e-4,
-        save_model=True,
+        save_model=False,
     ):
         """Train nanoGPT
 
@@ -355,38 +353,66 @@ class GPT(nn.Module):
             os.makedirs(model_dir)
 
         opt = torch.optim.AdamW(self.parameters(), lr=lr)
-        loss_func = nn.CrossEntropyLoss()
+        # loss_func = nn.CrossEntropyLoss()
 
         print(
             f"Training Starting. Total Params: {sum(p.numel() for p in self.parameters()) / 1e6}M"
         )
 
-        with tqdm(range(1, num_epochs + 1)) as tepoch:
-            for epoch in tepoch:
-                tepoch.set_description(f"Epoch: {epoch}")
-                X, Y = self.data_generator.generate_batch(
-                    "train", batch_size, self.block_size
-                )
-                out = self.forward(X)
-                logits = out.softmax(-1)
-                loss = loss_func(
-                    logits.view(
-                        batch_size * self.block_size,
-                        self.data_generator.vocab_size,
-                    ),
-                    Y.flatten(),
-                )
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
+        for epoch in range(1, num_epochs + 1):
+            X, Y = self.data_generator.generate_batch(
+                "train", batch_size, self.block_size
+            )
+            logits = self.forward(X)
+            B, T, C = logits.shape
 
-                tepoch.set_postfix(loss=loss.item(), val_loss=0)
+            loss = F.cross_entropy(
+                logits.view(B * T, C),
+                Y.view(B * T),
+            )
 
-                if epoch % checkpoint_itvl == 0:
-                    if save_model:
-                        # Save model
-                        with open(f"{model_dir}/epoch_{epoch}.pt", "wb") as f:
-                            torch.save(self.state_dict(), f)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            print(f"Epoch: {epoch}; Loss: {loss.item()}")
+            opt.step()
+
+            if epoch % checkpoint_itvl == 0:
+                if save_model:
+                    # Save model
+                    with open(f"{model_dir}/epoch_{epoch}.pt", "wb") as f:
+                        torch.save(self.state_dict(), f)
+
+    def load_model(self, model_path: str) -> None:
+        """Load saved model
+
+        Args:
+            model_path (str): Model path
+        """
+        try:
+            self.load_state_dict(
+                torch.load(model_path, map_location=self.device)
+            )
+            print("Saved model loaded successfully!")
+        except Exception as err:
+            print(err)
+
+    def generate(self, idx, max_new_tokens):
+        # idx is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens):
+            # crop idx to the last block_size tokens
+            idx_cond = idx[:, -self.block_size :]
+            # get the predictions
+            logits = self(idx_cond)
+            # focus only on the last time step
+            logits = logits[:, -1, :]  # becomes (B, C)
+            # apply softmax to get probabilities
+            probs = logits.softmax(dim=-1)  # (B, C)
+            # probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            # append sampled index to the running sequence
+            idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
+        return idx
 
 
 if __name__ == "__main__":
